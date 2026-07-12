@@ -1,0 +1,32 @@
+{
+  "name": "myridius-aca-claude-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Azure Container Apps worker for AI implementation execution using pinned myridius CLI agent",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js",
+    "simulate": "node scripts/simulate-event.mjs",
+    "smoke:gate": "node scripts/smoke-gate.mjs",
+    "smoke:skip": "node scripts/smoke-skip-idempotency.mjs",
+    "smoke:blocked": "node scripts/smoke-blocked-event-idempotency.mjs",
+    "test": "node --test tests/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.3.1",
+    "@azure/event-hubs": "^5.12.2",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/typescript-estree": "^8.0.0",
+    "axios": "^1.9.0",
+    "myridius": "file:../myridius-cli-agent-0.9.2.tgz",
+    "simple-git": "^3.28.0",
+    "uuid": "^11.1.0",
+    "xml2js": "^0.6.2"
+  }
+}
+
+
+
+
+

@@ -1,0 +1,36 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+
+    "ANTHROPIC_API_KEY": "your-anthropic-api-key",
+
+    "AZDO_ORG_URL": "https://dev.azure.com/your-org",
+    "AZDO_PAT": "your-azure-devops-pat",
+    "AZDO_PROJECT": "your-project-name",
+
+    "EVENT_HUB_CONNECTION_STRING": "Endpoint=sb://your-namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=your-key",
+    "EVENT_HUB_NAME": "implementation-events",
+    "EVENT_HUB_CONSUMER_GROUP": "$Default",
+
+    "AZURE_OPENAI_ENDPOINT": "https://your-openai.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY": "your-azure-openai-key",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT": "text-embedding-ada-002",
+
+    "AZURE_SEARCH_ENDPOINT": "https://your-search.search.windows.net",
+    "AZURE_SEARCH_API_KEY": "your-search-api-key",
+    "AZURE_SEARCH_INDEX_NAME": "code-index",
+
+    "LOG_LEVEL": "info",
+    "ENABLE_TELEMETRY": "true",
+
+    "MAX_CONCURRENT_IMPLEMENTATIONS": "3",
+    "IMPLEMENTATION_TIMEOUT_MINUTES": "30"
+  },
+  "Host": {
+    "LocalHttpPort": 7072,
+    "CORS": "*"
+  }
+}
+

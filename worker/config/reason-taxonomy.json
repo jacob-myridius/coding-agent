@@ -1,0 +1,9 @@
+{
+  "WrongType": "Skipped: work item type is not User Story.",
+  "NoStatusTransition": "Skipped: AIPlanningStatus did not transition to ReadyForAIImplementation.",
+  "MissingRepoContext": "Skipped: repository context is missing.",
+  "ExecutionSuppressed": "Skipped: implementation execution is suppressed because no active pull request was detected.",
+  "InvalidPayload": "Skipped: webhook payload is missing required fields."
+}
+
+

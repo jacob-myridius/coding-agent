@@ -1,5 +1,5 @@
 import { parse } from "@typescript-eslint/typescript-estree";
-import type { CodeChunk, CodeParserResult, ParsedCodeFile } from "./codeIndexTypes.js";
+import type { CodeChunk, CodeParserResult } from "./codeIndexTypes.js";
 
 export function parseTypeScriptFile(filePath: string, content: string): CodeParserResult {
   try {
@@ -13,7 +13,6 @@ export function parseTypeScriptFile(filePath: string, content: string): CodePars
     const chunks: CodeChunk[] = [];
     const imports: string[] = extractImports(content);
     const lines = content.split("\n");
-    const totalLines = lines.length;
 
     // Extract top-level declarations
     for (const node of ast.body) {

@@ -55,7 +55,7 @@ export function createCodeRetrievalService(config: AppConfig): CodeRetrievalServ
           throw new Error(`Code search failed: ${response.status} ${error}`);
         }
 
-        const result = await response.json();
+        const result: any = await response.json();
 
         // Parse results
         const matches = parseSearchResults(result, request);
@@ -74,7 +74,7 @@ export function createCodeRetrievalService(config: AppConfig): CodeRetrievalServ
   };
 }
 
-function buildSearchRequest(request: CodeRetrievalRequest, top: number, config: AppConfig): any {
+function buildSearchRequest(request: CodeRetrievalRequest, top: number, _config: AppConfig): any {
   // Build filter conditions
   const filters: string[] = [];
 
@@ -123,7 +123,7 @@ function buildSearchRequest(request: CodeRetrievalRequest, top: number, config: 
   };
 }
 
-function parseSearchResults(result: any, request: CodeRetrievalRequest): CodeRetrievalMatch[] {
+function parseSearchResults(result: any, _request: CodeRetrievalRequest): CodeRetrievalMatch[] {
   const matches: CodeRetrievalMatch[] = [];
 
   if (!result.value || !Array.isArray(result.value)) {

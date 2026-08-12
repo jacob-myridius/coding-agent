@@ -3,6 +3,9 @@
  * Main orchestrator for test execution pipeline
  */
 
+import { access } from 'fs/promises';
+import { join } from 'path';
+import { spawn } from 'child_process';
 import { detectTestFramework } from './testFrameworkDetector.js';
 import { createTestRunner, isFrameworkSupported } from './testRunnerFactory.js';
 import { validateTestResults } from './testValidator.js';
@@ -52,6 +55,10 @@ export async function executeTests(
     throw new Error(`Failed to create test runner for ${frameworkInfo.framework}`);
   }
 
+  // Step 3.5: Install dependencies so test binaries are available in the workspace
+  log('Installing dependencies...');
+  await installDependencies(workspacePath, frameworkInfo.framework, log);
+
   // Step 4: Execute tests
   log('Executing tests...');
   const execution = await runner.execute(workspacePath, config);
@@ -99,6 +106,44 @@ export async function executeTests(
     validation,
     timestamp: new Date()
   };
+}
+
+/**
+ * Install project dependencies before running tests.
+ * Uses the lock file if present (npm ci), otherwise npm install.
+ * For Maven projects, mvn test already resolves deps — no pre-step needed.
+ */
+async function installDependencies(
+  workspacePath: string,
+  framework: TestFramework,
+  log: (msg: string) => void
+): Promise<void> {
+  // Node-based frameworks need npm install in the workspace
+  if (
+    framework === TestFramework.JEST ||
+    framework === TestFramework.VITEST ||
+    framework === TestFramework.MOCHA
+  ) {
+    const lockFile = join(workspacePath, 'package-lock.json');
+    const hasLock = await access(lockFile).then(() => true).catch(() => false);
+    const cmd = hasLock ? 'npm ci' : 'npm install';
+    log(`Running ${cmd}...`);
+    await runInstallCommand(cmd.split(' '), workspacePath);
+  }
+  // Maven/Gradle: mvn test / ./gradlew test handle dependency resolution internally — no pre-step.
+  // .NET: dotnet restore is handled by dotnet test — no pre-step.
+}
+
+function runInstallCommand(command: string[], cwd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const [cmd, ...args] = command;
+    const child = spawn(cmd, args, { cwd, shell: true, env: { ...process.env, CI: 'true' } });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command.join(' ')} exited with code ${code}`));
+    });
+  });
 }
 
 /**

@@ -52,6 +52,16 @@ export async function runTests(workspacePath, logger = console) {
       message
     };
   } catch (error) {
+    // No test framework detected is not a blocking failure — just skip tests and let the PR proceed.
+    if (error.message && error.message.includes('No supported test framework detected')) {
+      logger.log(`Test execution skipped: ${error.message}`);
+      return {
+        success: true,
+        summary: null,
+        message: 'Test execution skipped — no supported test framework detected in repository'
+      };
+    }
+
     logger.error(`Test execution error: ${error.message}`);
 
     return {

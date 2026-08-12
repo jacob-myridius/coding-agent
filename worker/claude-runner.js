@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Resolve the myridius CLI path relative to this file so it works regardless
+// of where the worker is installed (/app/worker/node_modules in the container).
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const MYRIDIUS_CLI_PATH = join(__dirname, "node_modules", "myridius", "dist", "cli.mjs");
 
 export async function runMyridiusImplementation({ workspacePath, prompt }) {
   const promptFile = join(workspacePath, "IMPLEMENTATION_PROMPT.md");
@@ -32,7 +38,7 @@ export function buildMyridiusCliInvocation(env) {
   const runningAsRoot = isRunningAsRoot(env);
 
   const bin = "node";
-  const args = ["/app/node_modules/myridius/dist/cli.mjs", "--print"];
+  const args = [MYRIDIUS_CLI_PATH, "--print"];
   if (agent) {
     args.push("--agent", agent);
   }

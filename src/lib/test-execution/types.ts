@@ -9,6 +9,7 @@
 export enum TestFramework {
   VITEST = 'vitest',
   JEST = 'jest',
+  MOCHA = 'mocha',
   JUNIT = 'junit',
   NUNIT = 'nunit',
   PYTEST = 'pytest',

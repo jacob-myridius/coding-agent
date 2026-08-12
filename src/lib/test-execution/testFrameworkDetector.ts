@@ -92,6 +92,24 @@ async function detectNodeFramework(workspacePath: string): Promise<TestFramework
       };
     }
 
+    // Check for Mocha
+    if (deps['mocha']) {
+      const configFile = await findFile(workspacePath, [
+        '.mocharc.js',
+        '.mocharc.cjs',
+        '.mocharc.yaml',
+        '.mocharc.yml',
+        '.mocharc.json'
+      ]);
+
+      return {
+        framework: TestFramework.MOCHA,
+        configFile,
+        testCommand: scripts['test'] || 'mocha',
+        confidence: 0.95
+      };
+    }
+
     // Check scripts for hints
     const testScript = scripts['test'] || '';
     if (testScript.includes('vitest')) {
@@ -104,6 +122,13 @@ async function detectNodeFramework(workspacePath: string): Promise<TestFramework
     if (testScript.includes('jest')) {
       return {
         framework: TestFramework.JEST,
+        testCommand: testScript,
+        confidence: 0.7
+      };
+    }
+    if (testScript.includes('mocha')) {
+      return {
+        framework: TestFramework.MOCHA,
         testCommand: testScript,
         confidence: 0.7
       };

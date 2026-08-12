@@ -6,6 +6,7 @@
 import { TestFramework, ITestRunner } from './types.js';
 import { VitestTestRunner } from './runners/vitestRunner.js';
 import { JestTestRunner } from './runners/jestRunner.js';
+import { MochaTestRunner } from './runners/mochaRunner.js';
 import { JUnitTestRunner } from './runners/junitRunner.js';
 
 /**
@@ -20,6 +21,9 @@ export function createTestRunner(framework: TestFramework): ITestRunner | null {
 
     case TestFramework.JEST:
       return new JestTestRunner();
+
+    case TestFramework.MOCHA:
+      return new MochaTestRunner();
 
     case TestFramework.JUNIT:
       return new JUnitTestRunner();

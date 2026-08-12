@@ -1,5 +1,10 @@
 You are implementing Azure DevOps User Story {{WORK_ITEM_ID}}.
 
+Repository:
+{{REPO_NAME}}
+
+{{ALL_REPOS_CONTEXT}}
+
 Work item branch (must be used):
 {{WORK_ITEM_BRANCH}}
 
@@ -11,6 +16,8 @@ Description:
 
 Acceptance Criteria:
 {{ACCEPTANCE_CRITERIA}}
+
+{{TECH_STACK}}
 
 {{CODE_CONTEXT}}
 
@@ -28,7 +35,8 @@ Constraints:
 - Follow repository architecture and conventions
 - Minimize unrelated changes
 - Add or update unit tests where applicable
-- Write tests that can be executed by standard test frameworks (Maven, Gradle, npm, pytest, etc.)
+- Use the build and test commands from TECHSTACK.md if present; otherwise infer from the project structure
+- Write tests compatible with the framework listed in TECHSTACK.md (or detected from the repo)
 - Keep commit scope aligned to this work item
 - Commit all changes (implementation + tests) to the work item branch
 

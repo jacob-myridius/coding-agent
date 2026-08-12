@@ -1,64 +1,47 @@
-# Multi-stage Docker build for Implementation Worker
-
-FROM node:20-alpine AS builder
+# Stage 1: compile TypeScript from the parent package (src/ → dist/)
+FROM node:20-alpine AS ts-builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
-COPY tsconfig.json ./
-
-# Install dependencies
+COPY package*.json tsconfig.json ./
 RUN npm ci
 
-# Copy source code
 COPY src/ ./src/
-COPY functions/ ./functions/
-
-# Copy CLI agent if present
-COPY myridius-cli-agent-*.tgz ./
-
-# Build TypeScript
 RUN npm run build
 
-# Production stage
+# Stage 2: production image
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Install production dependencies only
+# Install git and bash (bash required by Myridius CLI for shell execution)
+RUN apk add --no-cache git bash
+
+# Install parent production dependencies (needed by compiled dist/ modules at runtime)
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
-# Copy built files from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/host.json ./
+# Copy compiled TypeScript output (used by test-execution.js via ../dist/src/...)
+COPY --from=ts-builder /app/dist ./dist
 
-# Copy CLI agent
+# Copy the CLI agent tarball (referenced by worker/package.json as file:../<tgz>)
 COPY myridius-cli-agent-*.tgz ./
 
-# Install CLI agent
-RUN npm install ./myridius-cli-agent-*.tgz
+# Copy worker source (self-contained app with its own package.json)
+COPY worker/ ./worker/
 
-# Install git (required for git operations)
-RUN apk add --no-cache git
+# Install worker dependencies
+WORKDIR /app/worker
+RUN npm ci
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Set ownership
 RUN chown -R nodejs:nodejs /app
 
 USER nodejs
 
-# Expose port
 EXPOSE 80
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost/api/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"
-
-# Start the worker
-CMD ["node", "dist/worker/worker.js"]
-
+CMD ["node", "worker.js"]

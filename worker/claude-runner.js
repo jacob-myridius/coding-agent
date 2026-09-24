@@ -74,12 +74,20 @@ function buildCliEnv(env) {
   const mapped = { ...env };
 
   // Keep worker config path consistent across local/container runs.
-  mapped.CLAUDE_CONFIG_DIR = mapped.CLAUDE_CONFIG_DIR || "/app/config";
+  // The CLI reads MYRIDIUS_CONFIG_DIR (not CLAUDE_CONFIG_DIR).
+  mapped.MYRIDIUS_CONFIG_DIR = mapped.MYRIDIUS_CONFIG_DIR || mapped.CLAUDE_CONFIG_DIR || "/app/config";
 
   // Provide OpenAI aliases expected by the CLI if only MYRIDIUS_* values are set.
   mapped.OPENAI_API_KEY = mapped.OPENAI_API_KEY || mapped.MYRIDIUS_OPENAI_API_KEY || "";
   mapped.OPENAI_BASE_URL = mapped.OPENAI_BASE_URL || mapped.MYRIDIUS_OPENAI_MODEL_ENDPOINT || "";
   mapped.OPENAI_MODEL = mapped.OPENAI_MODEL || mapped.MYRIDIUS_OPENAI_DEPLOYMENT_NAME || "";
+
+  // When an OpenAI-compatible endpoint is configured, tell the CLI to use
+  // OpenAI-compatible mode. Without this the CLI defaults to Codex/GPT auth,
+  // overrides OPENAI_MODEL with "codexplan", and exits with "Not logged in".
+  if (mapped.OPENAI_BASE_URL && mapped.OPENAI_API_KEY && !mapped.MYRIDIUS_USE_OPENAI) {
+    mapped.MYRIDIUS_USE_OPENAI = "1";
+  }
 
   return mapped;
 }

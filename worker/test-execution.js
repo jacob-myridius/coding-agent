@@ -3,7 +3,7 @@
  * Provides JavaScript interface for worker to call TypeScript test execution
  */
 
-import { executeTests, createTestConfigFromEnv, formatValidationMessage } from '../src/lib/test-execution/index.js';
+import { executeTests, createTestConfigFromEnv, formatValidationMessage } from '../dist/src/lib/test-execution/index.js';
 
 /**
  * Execute tests and return formatted result

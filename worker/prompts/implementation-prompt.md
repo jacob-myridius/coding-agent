@@ -21,6 +21,8 @@ Acceptance Criteria:
 
 {{CODE_CONTEXT}}
 
+{{IMPLEMENTATION_PLAN}}
+
 Execution mode:
 - You are running in a non-interactive automation worker.
 - Do not ask clarifying questions.

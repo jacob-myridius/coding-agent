@@ -1,7 +1,21 @@
+import http from "http";
 import { EventHubConsumerClient } from "@azure/event-hubs";
 import { processWorkItemEventBody } from "./processWorkItem.js";
 import { logWorkerEvent } from "./event-logger.js";
 import { TableCheckpointStore } from "./table-checkpoint-store.js";
+
+// Health HTTP server — start immediately so probes succeed even if Event Hub is misconfigured
+http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/api/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", service: "myridius-code-agent" }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+}).listen(parseInt(process.env.PORT ?? "80", 10), () => {
+  console.log("aca_claude_worker_health_server_listening", { port: process.env.PORT ?? 80 });
+});
 
 const connectionString = requiredEnv("EVENT_HUB_CONNECTION_STRING");
 const eventHubName = requiredEnv("EVENT_HUB_NAME");

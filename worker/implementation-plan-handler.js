@@ -109,7 +109,7 @@ export async function handleJiraImplementationPlan(payload, agentCtx, registered
   }
 
   // Generate plan via LLM
-  const planMarkdown = await generatePlan({
+  const { content: planMarkdown, usage: planUsage } = await generatePlan({
     issueKey,
     title: issue.title,
     description: issue.description,
@@ -119,6 +119,9 @@ export async function handleJiraImplementationPlan(payload, agentCtx, registered
     registeredRepos,
     dependencies,
   });
+
+  // Emit plan-generated event for token usage tracking
+  logConsoleEvent(consoleUrl, agentSecret, projectId, executionId, planUsage);
 
   // Acquire write credentials and persist plan
   const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
@@ -160,7 +163,7 @@ export async function handleGitHubImplementationPlan(ctx, agentCtx, registeredRe
   console.log("impl_plan_github: starting plan generation", { owner, repoName, issueNumber, projectId });
 
   // Generate plan via LLM (GitHub has no attachment API — use issue body only)
-  const planMarkdown = await generatePlan({
+  const { content: planMarkdown, usage: planUsage } = await generatePlan({
     issueKey: `${owner}/${repoName}#${issueNumber}`,
     title: ctx.title,
     description: ctx.body,
@@ -170,6 +173,11 @@ export async function handleGitHubImplementationPlan(ctx, agentCtx, registeredRe
     registeredRepos,
     dependencies,
   });
+
+  // Emit plan-generated event for token usage tracking
+  const consoleUrl = process.env.CONSOLE_URL;
+  const agentSecret = process.env.AGENT_CALLBACK_SECRET;
+  logConsoleEvent(consoleUrl, agentSecret, projectId, executionId, planUsage);
 
   // Post plan as a specially-marked comment
   const commentBody =
@@ -225,7 +233,9 @@ async function generatePlan({ issueKey, title, description, acceptanceCriteria, 
     .replaceAll("{{REGISTERED_REPOS}}", repoList);
 
   if (dependencies.generatePlan) {
-    return dependencies.generatePlan(prompt);
+    const result = await dependencies.generatePlan(prompt);
+    // Support both legacy string return and new { content, usage } return
+    return typeof result === "string" ? { content: result, usage: undefined } : result;
   }
 
   return callAzureOpenAI(prompt);
@@ -276,7 +286,11 @@ async function callAzureOpenAI(prompt) {
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content;
     if (!content) throw new Error("Azure OpenAI returned empty response for implementation plan");
-    return content;
+    const u = data.usage;
+    return {
+      content,
+      usage: u ? { promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens, totalTokens: u.total_tokens } : undefined,
+    };
   }
 
   throw lastError ?? new Error("Azure OpenAI request failed after retries");
@@ -285,6 +299,25 @@ async function callAzureOpenAI(prompt) {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+function logConsoleEvent(consoleUrl, agentSecret, projectId, executionId, tokenUsage) {
+  if (!consoleUrl || !agentSecret || !projectId) return;
+  fetch(`${consoleUrl}/api/projects/${projectId}/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${agentSecret}`,
+    },
+    body: JSON.stringify({
+      stage: "implementation",
+      agentName: "code",
+      eventType: "plan-generated",
+      summary: "Implementation plan generated",
+      detail: JSON.stringify({ executionId }),
+      ...(tokenUsage ? { tokenUsage } : {}),
+    }),
+  }).catch(() => {});
+}
 
 function extractJiraHost(payload) {
   const selfUrl = payload?.user?.self || payload?.issue?.self || "";

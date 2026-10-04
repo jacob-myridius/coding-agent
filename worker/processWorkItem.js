@@ -33,6 +33,8 @@ import { getCodeContext } from "./code-context.js";
 import { runTests } from "./test-execution.js";
 import { ensureMavenGitignore, isMavenProject } from "./gitignore-manager.js";
 import { selectRepositories } from "./repo-selector.js";
+import { generateOpenApiSpec } from "./swagger-generator.js";
+import { acquireStoryLock, updateHeartbeat, releaseStoryLock } from "./story-lock.js";
 
 const STATUS_REASON_FIELD = (process.env.AI_PLANNING_STATUS_REASON_FIELD_REF_NAME || "AIPlanningStatusReason").trim();
 const STATUS_FIELD = (process.env.AI_PLANNING_STATUS_FIELD_REF_NAME || "AIPlanningStatus").trim();
@@ -112,6 +114,35 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
   const allRepoNames = selectedRepos.map((r) => r.name);
   console.log(`implementing work item ${decision.workItemId} across ${allRepoNames.length} repo(s): [${allRepoNames.join(", ")}]`);
 
+  // ── Distributed lock — prevent duplicate implementation ─────────────────────
+  const storageConnStrAdo = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  const executionIdAdo = agentCtxAdo.executionId;
+  const adoLockScope = `${org || "ado"}:${project || "default"}`;
+  const adoStoryId = String(decision.workItemId);
+  let adoLockHeld = false;
+
+  if (storageConnStrAdo && executionIdAdo) {
+    const lockResult = await acquireStoryLock(storageConnStrAdo, {
+      tracker: "ado",
+      scope: adoLockScope,
+      storyId: adoStoryId,
+      executionId: executionIdAdo,
+      storyTitle: title,
+    });
+    if (!lockResult.acquired) {
+      await azdo.postComment(decision.workItemId, buildDuplicateBlockedComment(lockResult.existingLock, executionIdAdo, "ado", adoLockScope, adoStoryId)).catch(() => {});
+      logConsoleEvent(agentCtxAdo.projectId, "implementation-duplicate-blocked", executionIdAdo, { storyId: adoStoryId, storyTitle: title });
+      return { category: "skipped", reasonCode: "DuplicateImplementation", reason: "Blocked by active lock" };
+    }
+    adoLockHeld = true;
+    const startComment = lockResult.stalePreviousLock
+      ? buildStaleLockTakeoverComment(lockResult.stalePreviousLock, executionIdAdo)
+      : buildImplementationStartedComment(executionIdAdo);
+    await azdo.postComment(decision.workItemId, startComment).catch(() => {});
+    logConsoleEvent(agentCtxAdo.projectId, lockResult.stalePreviousLock ? "implementation-resumed" : "implementation-started", executionIdAdo, { storyId: adoStoryId, storyTitle: title });
+    await updateHeartbeat(storageConnStrAdo, { tracker: "ado", scope: adoLockScope, storyId: adoStoryId, executionId: executionIdAdo });
+  }
+
   // --- Read prompt template once ---
   const promptTemplate = await readFile(path.join(process.cwd(), "prompts", "implementation-prompt.md"), "utf8");
 
@@ -153,13 +184,22 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
     await azdo.postComment(decision.workItemId, buildSummaryComment(repoResults, decision.workItemId, azdo));
   }
 
+  let adoResult;
   if (implemented.length === repoResults.length) {
-    return { category: "implemented", workItemId: decision.workItemId, repos: repoResults };
+    adoResult = { category: "implemented", workItemId: decision.workItemId, repos: repoResults };
+  } else if (blocked.length > 0) {
+    adoResult = { category: "blocked", workItemId: decision.workItemId, repos: repoResults };
+  } else {
+    adoResult = { category: "skipped", workItemId: decision.workItemId, repos: repoResults };
   }
-  if (blocked.length > 0) {
-    return { category: "blocked", workItemId: decision.workItemId, repos: repoResults };
+
+  if (adoLockHeld && storageConnStrAdo && executionIdAdo) {
+    const lockStatus = adoResult.category === "skipped" ? "failed" : "completed";
+    await releaseStoryLock(storageConnStrAdo, { tracker: "ado", scope: adoLockScope, storyId: adoStoryId, executionId: executionIdAdo, status: lockStatus });
+    logConsoleEvent(agentCtxAdo.projectId, `implementation-${lockStatus}`, executionIdAdo, { storyId: adoStoryId, storyTitle: title, tokenUsage: aggregateTokenUsage(repoResults) });
   }
-  return { category: "skipped", workItemId: decision.workItemId, repos: repoResults };
+
+  return adoResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +259,37 @@ async function processGitHubIssueEventBody(payload, dependencies = {}) {
       `Label with \`ai:ready-for-implementation-plan\` to generate a plan first, then re-label with \`ai:ready-for-implementation\` to proceed.`
     ).catch(() => {});
     return { category: "skipped", reasonCode: "MissingImplementationPlan", reason: "No implementation plan found" };
+  }
+
+  // ── Distributed lock — prevent duplicate implementation ─────────────────────
+  const storageConnStrGh = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  const executionIdGh = agentCtxGh.executionId;
+  const ghLockScope = `${ctx.owner}/${ctx.repoName}`;
+  const ghStoryId = String(ctx.issueNumber);
+  let ghLockHeld = false;
+
+  if (storageConnStrGh && executionIdGh) {
+    const lockResult = await acquireStoryLock(storageConnStrGh, {
+      tracker: "github",
+      scope: ghLockScope,
+      storyId: ghStoryId,
+      executionId: executionIdGh,
+      storyTitle: ctx.title,
+    });
+    if (!lockResult.acquired) {
+      await github.postComment(ctx.issueNumber, buildDuplicateBlockedComment(lockResult.existingLock, executionIdGh, "github", ghLockScope, ghStoryId)).catch(() => {});
+      logConsoleEvent(agentCtxGh.projectId, "implementation-duplicate-blocked", executionIdGh, { storyId: ghStoryId, storyTitle: ctx.title });
+      return { category: "skipped", reasonCode: "DuplicateImplementation", reason: "Blocked by active lock" };
+    }
+    ghLockHeld = true;
+    if (lockResult.stalePreviousLock) {
+      await github.postComment(ctx.issueNumber, buildStaleLockTakeoverComment(lockResult.stalePreviousLock, executionIdGh)).catch(() => {});
+      logConsoleEvent(agentCtxGh.projectId, "implementation-resumed", executionIdGh, { storyId: ghStoryId, storyTitle: ctx.title });
+    } else {
+      await github.postComment(ctx.issueNumber, buildImplementationStartedComment(executionIdGh)).catch(() => {});
+      logConsoleEvent(agentCtxGh.projectId, "implementation-started", executionIdGh, { storyId: ghStoryId, storyTitle: ctx.title });
+    }
+    await updateHeartbeat(storageConnStrGh, { tracker: "github", scope: ghLockScope, storyId: ghStoryId, executionId: executionIdGh });
   }
 
   const promptTemplate = await readFile(path.join(process.cwd(), "prompts", "implementation-prompt.md"), "utf8");
@@ -287,13 +358,22 @@ async function processGitHubIssueEventBody(payload, dependencies = {}) {
     await github.postComment(ctx.issueNumber, buildSummaryComment(repoResults, ctx.issueNumber, github));
   }
 
+  let ghResult;
   if (implemented.length === repoResults.length) {
-    return { category: "implemented", workItemId: ctx.issueNumber, repos: repoResults };
+    ghResult = { category: "implemented", workItemId: ctx.issueNumber, repos: repoResults };
+  } else if (blocked.length > 0) {
+    ghResult = { category: "blocked", workItemId: ctx.issueNumber, repos: repoResults };
+  } else {
+    ghResult = { category: "skipped", workItemId: ctx.issueNumber, repos: repoResults };
   }
-  if (blocked.length > 0) {
-    return { category: "blocked", workItemId: ctx.issueNumber, repos: repoResults };
+
+  if (ghLockHeld && storageConnStrGh && executionIdGh) {
+    const lockStatus = ghResult.category === "skipped" ? "failed" : "completed";
+    await releaseStoryLock(storageConnStrGh, { tracker: "github", scope: ghLockScope, storyId: ghStoryId, executionId: executionIdGh, status: lockStatus });
+    logConsoleEvent(agentCtxGh.projectId, `implementation-${lockStatus}`, executionIdGh, { storyId: ghStoryId, storyTitle: ctx.title, tokenUsage: aggregateTokenUsage(repoResults) });
   }
-  return { category: "skipped", workItemId: ctx.issueNumber, repos: repoResults };
+
+  return ghResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +480,50 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
     return { category: "skipped", reasonCode: "PlanCheckFailed", reason: `Plan pre-check failed: ${err.message}` };
   }
 
+  // ── Distributed lock — prevent duplicate implementation ─────────────────────
+  const storageConnStrJira = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  const jiraProjectKey = ctx.issueKey.split("-")[0];
+  const jiraLockScope = `${jiraHost}:${jiraProjectKey}`;
+  let jiraLockHeld = false;
+
+  if (storageConnStrJira && executionId) {
+    const lockResult = await acquireStoryLock(storageConnStrJira, {
+      tracker: "jira",
+      scope: jiraLockScope,
+      storyId: ctx.issueKey,
+      executionId,
+      storyTitle: ctx.title,
+    });
+    if (!lockResult.acquired) {
+      try {
+        const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+          projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+        );
+        await postJiraComment(jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
+          buildDuplicateBlockedComment(lockResult.existingLock, executionId, "jira", jiraLockScope, ctx.issueKey)
+        );
+      } catch (commentErr) {
+        console.warn(`aca_jira_worker: failed to post duplicate-blocked comment: ${commentErr.message}`);
+      }
+      logConsoleEvent(projectId, "implementation-duplicate-blocked", executionId, { storyId: ctx.issueKey, storyTitle: ctx.title });
+      return { category: "skipped", reasonCode: "DuplicateImplementation", reason: "Blocked by active lock" };
+    }
+    jiraLockHeld = true;
+    try {
+      const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+        projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+      );
+      const startComment = lockResult.stalePreviousLock
+        ? buildStaleLockTakeoverComment(lockResult.stalePreviousLock, executionId)
+        : buildImplementationStartedComment(executionId);
+      await postJiraComment(jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken, startComment).catch(() => {});
+    } catch (commentErr) {
+      console.warn(`aca_jira_worker: failed to post lock-start comment: ${commentErr.message}`);
+    }
+    logConsoleEvent(projectId, lockResult.stalePreviousLock ? "implementation-resumed" : "implementation-started", executionId, { storyId: ctx.issueKey, storyTitle: ctx.title });
+    await updateHeartbeat(storageConnStrJira, { tracker: "jira", scope: jiraLockScope, storyId: ctx.issueKey, executionId });
+  }
+
   // Determine which repos to implement in.
   // When a plan specifies "## Target Repositories", use those. Otherwise fall back to heuristic selection.
   const planTargetReposJira = parsePlanTargetRepos(implementationPlanContent);
@@ -496,13 +620,22 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
     }
   }
 
+  let jiraResult;
   if (implemented.length === repoResults.length) {
-    return { category: "implemented", workItemId: ctx.issueKey, repos: repoResults };
+    jiraResult = { category: "implemented", workItemId: ctx.issueKey, repos: repoResults };
+  } else if (blocked.length > 0) {
+    jiraResult = { category: "blocked", workItemId: ctx.issueKey, repos: repoResults };
+  } else {
+    jiraResult = { category: "skipped", workItemId: ctx.issueKey, repos: repoResults };
   }
-  if (blocked.length > 0) {
-    return { category: "blocked", workItemId: ctx.issueKey, repos: repoResults };
+
+  if (jiraLockHeld && storageConnStrJira && executionId) {
+    const lockStatus = jiraResult.category === "skipped" ? "failed" : "completed";
+    await releaseStoryLock(storageConnStrJira, { tracker: "jira", scope: jiraLockScope, storyId: ctx.issueKey, executionId, status: lockStatus });
+    logConsoleEvent(projectId, `implementation-${lockStatus}`, executionId, { storyId: ctx.issueKey, storyTitle: ctx.title, tokenUsage: aggregateTokenUsage(repoResults) });
   }
-  return { category: "skipped", workItemId: ctx.issueKey, repos: repoResults };
+
+  return jiraResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +703,13 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
       .replaceAll("{{TECH_STACK}}", techStackSection)
       .replaceAll("{{CODE_CONTEXT}}", codeContext || "");
 
-    await runImplementation({ workspacePath, prompt });
+    const implResult = await runImplementation({ workspacePath, prompt });
+    const implTokenUsage = implResult?.tokenUsage;
+
+    // Generate / update openapi.yaml before pushing so the spec is part of the implementation commit.
+    await generateOpenApiSpec(workspacePath).catch((err) =>
+      console.warn(`[${repoName}] openapi.yaml generation skipped: ${err.message}`)
+    );
 
     const finalHead = await repoGit.revparse(["HEAD"]);
     if (String(finalHead || "") === String(initialHead || "")) {
@@ -588,8 +727,16 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
       error: (msg) => console.error(`[${repoName}][Tests] ${msg}`)
     });
 
+    // Post a per-repo test result comment to the work item immediately after tests run.
+    if (testResult.summary) {
+      const testComment = buildTestResultComment(repoName, testResult);
+      azdo.postComment(decision.workItemId, testComment).catch((err) =>
+        console.warn(`[${repoName}] Failed to post test result comment: ${err.message}`)
+      );
+    }
+
     if (!testResult.success) {
-      return { category: "blocked", reasonCode: "TestsFailed", repoName, branchName, testSummary: testResult.summary };
+      return { category: "blocked", reasonCode: "TestsFailed", repoName, branchName, testSummary: testResult.summary, tokenUsage: implTokenUsage };
     }
 
     let activePr = await findActivePullRequestWithRetry(azdo, repoName, branchName, 2, 1000);
@@ -608,7 +755,7 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
         console.log(`[${repoName}] PR #${activePr.pullRequestId} created.`);
       } catch (err) {
         console.error(`[${repoName}] Failed to create PR: ${err.message}`);
-        return { category: "implemented", repoName, branchName, testSummary: testResult.summary, prCreated: false };
+        return { category: "implemented", repoName, branchName, testSummary: testResult.summary, prCreated: false, tokenUsage: implTokenUsage };
       }
     }
 
@@ -619,7 +766,8 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
       pullRequestId: activePr.pullRequestId,
       pullRequestUrl: activePr.url || buildPrUrl(azdo, repoName, activePr.pullRequestId),
       testSummary: testResult.summary,
-      prCreated: true
+      prCreated: true,
+      tokenUsage: implTokenUsage,
     };
   } catch (err) {
     console.error(`[${repoName}] Implementation error: ${err.message}`);
@@ -660,6 +808,45 @@ async function resolveRepos(azdo, decision, { title, description }, registeredRe
 // ---------------------------------------------------------------------------
 // Comment builders
 // ---------------------------------------------------------------------------
+
+/**
+ * Build a per-repo test result comment posted immediately after tests run.
+ * Includes pass/fail counts, coverage %, and a warning when coverage falls
+ * below the COVERAGE_THRESHOLD env var (default 80).
+ */
+function buildTestResultComment(repoName, testResult) {
+  const s = testResult.summary;
+  const icon = testResult.success ? "✅" : "❌";
+  const coverageThreshold = parseInt(process.env.COVERAGE_THRESHOLD || "80", 10);
+  const lines = [
+    `## ${icon} Test Results — \`${repoName}\`\n`,
+    `| Metric | Value |`,
+    `|--------|-------|`,
+    `| Framework | ${s.framework || "unknown"} |`,
+    `| Total | ${s.total ?? "—"} |`,
+    `| Passed | ${s.passed ?? "—"} |`,
+    `| Failed | ${s.failed ?? "—"} |`,
+    `| Skipped | ${s.skipped ?? "—"} |`,
+  ];
+
+  if (s.coverage) {
+    const overall = typeof s.coverage.overall === "number" ? s.coverage.overall.toFixed(1) : "—";
+    lines.push(`| Coverage (overall) | ${overall}% |`);
+    if (typeof s.coverage.overall === "number" && testResult.success && s.coverage.overall < coverageThreshold) {
+      lines.push("");
+      lines.push(`> ⚠️ **Coverage warning:** ${overall}% is below the project threshold of ${coverageThreshold}%.`);
+    }
+  }
+
+  if (!testResult.success) {
+    lines.push("");
+    lines.push("Tests failed — branch pushed for review but PR creation is blocked until tests pass.");
+  }
+
+  lines.push("");
+  lines.push("*Generated by Myridius AI Implementation Worker*");
+  return lines.join("\n");
+}
 
 function buildSummaryComment(repoResults, workItemId, azdo) {
   const lines = [`## AI Implementation Summary — Work Item #${workItemId}\n`];
@@ -784,8 +971,8 @@ function parsePlanTargetRepos(planContent) {
   const lines = sectionMatch[1].split("\n");
   const repos = [];
   for (const line of lines) {
-    const m = line.match(/^-\s+([\w][\w.-]*)(?:\s*:.*)?$/);
-    if (m) repos.push(m[1]);
+    const m = line.match(/^-\s+([\w][\w./-]*)(?:\s*:.*)?$/);
+    if (m) repos.push(m[1].split("/").pop());
   }
   return repos;
 }
@@ -801,4 +988,111 @@ function extractJiraHost(payload) {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lock comment builders
+// ---------------------------------------------------------------------------
+
+function buildImplementationStartedComment(executionId) {
+  const now = new Date().toISOString();
+  return [
+    `## 🚀 Implementation Started`,
+    ``,
+    `| Field | Value |`,
+    `|---|---|`,
+    `| Execution ID | \`${executionId}\` |`,
+    `| Started | ${now} |`,
+    ``,
+    `This story is locked to prevent concurrent agent runs. The lock is released automatically when implementation completes or after ${process.env.CODE_AGENT_LOCK_STALE_HOURS || 2} hours without a heartbeat.`,
+    ``,
+    `> *Myridius Code Agent*`,
+  ].join("\n");
+}
+
+function buildStaleLockTakeoverComment(staleLock, currentExecutionId) {
+  const staleHours = process.env.CODE_AGENT_LOCK_STALE_HOURS || 2;
+  return [
+    `## ⚠️ Resuming Stalled Implementation`,
+    ``,
+    `A previous implementation run (\`${staleLock.executionId}\`) appears to have stalled.`,
+    `Last heartbeat: **${staleLock.lastHeartbeat}** (over ${staleHours}h ago). It has been automatically released.`,
+    ``,
+    `New execution \`${currentExecutionId}\` is now proceeding.`,
+    ``,
+    `> *Myridius Code Agent*`,
+  ].join("\n");
+}
+
+function buildDuplicateBlockedComment(existingLock, currentExecutionId, tracker, scope, storyId) {
+  return [
+    `## ⚠️ Duplicate Implementation Request Blocked`,
+    ``,
+    `An active implementation is already in progress:`,
+    ``,
+    `| Field | Value |`,
+    `|---|---|`,
+    `| Active Execution ID | \`${existingLock.executionId}\` |`,
+    `| Started | ${existingLock.lockedAt} |`,
+    `| Last Heartbeat | ${existingLock.lastHeartbeat} |`,
+    ``,
+    `This request (\`${currentExecutionId}\`) has been blocked to prevent branch conflicts.`,
+    ``,
+    `**To manually unlock**, delete the lock row from Azure Table Storage:`,
+    `- Table: \`codeAgentStoryLocks\``,
+    `- PartitionKey: \`${tracker}:${scope}\``,
+    `- RowKey: \`${storyId}\``,
+    ``,
+    `Then re-apply \`ai:ready-for-implementation\` to retry.`,
+    ``,
+    `> *Myridius Code Agent*`,
+  ].join("\n");
+}
+
+/**
+ * Fire-and-forget POST to the console API event log.
+ * Failures are silently swallowed — this is observability, not control flow.
+ */
+function aggregateTokenUsage(repoResults) {
+  let promptTokens = 0, completionTokens = 0, totalTokens = 0;
+  for (const r of repoResults) {
+    if (r.tokenUsage) {
+      promptTokens += r.tokenUsage.promptTokens || 0;
+      completionTokens += r.tokenUsage.completionTokens || 0;
+      totalTokens += r.tokenUsage.totalTokens || 0;
+    }
+  }
+  return totalTokens > 0 ? { promptTokens, completionTokens, totalTokens } : undefined;
+}
+
+function logConsoleEvent(projectId, eventType, executionId, { storyId, storyTitle, tokenUsage } = {}) {
+  const consoleUrl = process.env.CONSOLE_URL;
+  const secret = process.env.AGENT_CALLBACK_SECRET;
+  if (!consoleUrl || !secret || !projectId) return;
+  const ref = storyId ?? "work item";
+  const summaryMap = {
+    "implementation-started": `Implementation started for ${ref}`,
+    "implementation-completed": `Implementation completed for ${ref}`,
+    "implementation-failed": `Implementation failed for ${ref}`,
+    "implementation-resumed": `Implementation resumed for ${ref}`,
+    "implementation-duplicate-blocked": `Duplicate implementation blocked for ${ref}`,
+  };
+  const summary = summaryMap[eventType] ?? `${eventType} for ${ref}`;
+  fetch(`${consoleUrl}/api/projects/${projectId}/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({
+      stage: "implementation",
+      agentName: "code",
+      eventType,
+      summary,
+      storyId,
+      storyTitle,
+      detail: JSON.stringify({ executionId }),
+      ...(tokenUsage ? { tokenUsage } : {}),
+    }),
+  }).catch(() => {});
 }

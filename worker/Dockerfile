@@ -70,16 +70,16 @@ COPY myridius-cli-agent-0.9.2.tgz /myridius-cli-agent-0.9.2.tgz
 COPY worker/package.json /app/package.json
 RUN npm install --omit=dev
 
-# Copy compiled JavaScript from build directory (worker imports from ../src/lib)
-RUN cp -r /build/dist/src/ /src/
+# Copy compiled JavaScript from build directory (worker imports from ../dist/src/lib)
+RUN cp -r /build/dist/ /dist/
 
-# Create symlink so /src code can find node_modules from /app
-RUN ln -s /app/node_modules /src/node_modules
+# Create symlink so /dist/src code can find node_modules from /app
+RUN ln -s /app/node_modules /dist/src/node_modules
 
 # Copy worker application files
 COPY worker/ /app/
 RUN chmod +x /app/scripts/startup.sh
-RUN mkdir -p /app/config && chown -R node:node /app /src
+RUN mkdir -p /app/config && chown -R node:node /app /dist
 
 # Verify build tools are accessible and create verification script
 RUN echo '#!/bin/bash\necho "=== Build Tools Verification ==="\necho "Java: $(which java || echo NOT_FOUND)"\njava -version 2>&1 | head -1 || echo "Java not working"\necho "Maven: $(which mvn || echo NOT_FOUND)"\nmvn -version 2>&1 | head -1 || echo "Maven not working"\necho "Gradle: $(which gradle || echo NOT_FOUND)"\necho "Node: $(which node)"\necho "================================"' > /usr/local/bin/verify-tools && chmod +x /usr/local/bin/verify-tools

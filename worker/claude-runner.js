@@ -15,12 +15,14 @@ export async function runMyridiusImplementation({ workspacePath, prompt }) {
   const { bin, args } = buildMyridiusCliInvocation(process.env);
   console.log("aca_claude_worker_cli_invocation", { bin, args });
 
-  await runProcess(bin, args, {
+  const { tokenUsage } = await runProcess(bin, args, {
     cwd: workspacePath,
     env: buildCliEnv(process.env),
     stdinFile: promptFile,
     streamLineLogs: parseBooleanFlag(process.env.MYRIDIUS_CLI_STREAM_LINE_LOGS, true)
   });
+
+  return { tokenUsage };
 }
 
 export function buildMyridiusCliInvocation(env) {
@@ -38,7 +40,7 @@ export function buildMyridiusCliInvocation(env) {
   const runningAsRoot = isRunningAsRoot(env);
 
   const bin = "node";
-  const args = [MYRIDIUS_CLI_PATH, "--print"];
+  const args = [MYRIDIUS_CLI_PATH, "--print", "--output-format", "json"];
   if (agent) {
     args.push("--agent", agent);
   }
@@ -110,10 +112,21 @@ function runProcess(bin, args, options) {
       shell: false
     });
 
-    const forwardStdout = createLineForwarder("aca_claude_worker_cli_stdout_line", streamLineLogs, process.stdout);
+    // Buffer stdout so we can parse the JSON result message for token usage.
+    // Optionally also log each line for observability.
+    let stdoutBuffer = "";
     const forwardStderr = createLineForwarder("aca_claude_worker_cli_stderr_line", streamLineLogs, process.stderr);
 
-    child.stdout.on("data", (chunk) => forwardStdout(chunk));
+    child.stdout.on("data", (chunk) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      stdoutBuffer += text;
+      if (streamLineLogs) {
+        for (const line of text.split(/\r?\n/)) {
+          if (line.trim()) console.log("aca_claude_worker_cli_stdout_line", { line });
+        }
+      }
+    });
+
     child.stderr.on("data", (chunk) => forwardStderr(chunk));
 
     import("node:fs").then((fs) => {
@@ -125,10 +138,35 @@ function runProcess(bin, args, options) {
 
     child.on("error", (error) => reject(error));
     child.on("close", (code) => {
-      forwardStdout.flush();
       forwardStderr.flush();
+
+      // Parse the JSON result message to extract token usage.
+      // --output-format json produces NDJSON (one JSON object per line). Scan each
+      // line looking for the terminal result message that carries usage totals.
+      let tokenUsage;
+      for (const line of stdoutBuffer.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{")) continue;
+        try {
+          const msg = JSON.parse(trimmed);
+          if (msg.type === "result" && msg.usage && typeof msg.usage === "object") {
+            const u = msg.usage;
+            const promptTokens = u.input_tokens || 0;
+            const completionTokens = u.output_tokens || 0;
+            const totalTokens = promptTokens + completionTokens;
+            if (totalTokens > 0) {
+              tokenUsage = { promptTokens, completionTokens, totalTokens };
+              console.log("aca_claude_worker_cli_token_usage", tokenUsage);
+            }
+            break;
+          }
+        } catch {
+          // not JSON — skip
+        }
+      }
+
       if (code === 0) {
-        resolve(undefined);
+        resolve({ tokenUsage });
         return;
       }
       reject(new Error(`Myridius CLI exited with code ${code}`));

@@ -21,6 +21,9 @@ Given the story details and available design documents, produce a detailed, acti
 ### UI/UX Specification
 {{UIUX_DOC}}
 
+## Test Plan Reference
+{{TEST_PLAN}}
+
 ## Registered Repositories
 
 The following repositories are registered for this project. Your plan must only reference repositories from this list:
@@ -50,6 +53,12 @@ List any external libraries, services, or APIs that must be added or configured.
 
 ## Risks
 List implementation risks or ambiguities that the developer should be aware of.
+
+## Test Code Changes
+Describe the test code changes required to implement the test plan above. Map each section of the "Repository Impact" in the test plan to specific test files, test cases, and test data that must be created or modified. Include:
+- New test files and their locations
+- Test cases that must pass to satisfy the acceptance criteria
+- Any test infrastructure, mocks, or fixtures required
 
 ---
 

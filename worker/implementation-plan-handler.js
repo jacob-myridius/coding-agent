@@ -79,6 +79,25 @@ export async function handleJiraImplementationPlan(payload, agentCtx, registered
   const issue = await fetchJiraIssue(jiraHost, issueKey, jiraEmail, jiraToken);
   const currentLabels = issue.labels;
 
+  // Gate: check for test-plan-*.md on the issue itself
+  const issueAttachments = await fetchIssueAttachments(jiraHost, issueKey, jiraEmail, jiraToken);
+  const testPlanAttachment = issueAttachments.find((a) => /^test-plan-.+\.md$/i.test(a.filename));
+  if (!testPlanAttachment) {
+    // Acquire write credentials to post the comment and update labels
+    const { token: writeToken, email: writeEmail } = await acquireToken(
+      projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+    );
+    await postJiraComment(jiraHost, issueKey, writeEmail, writeToken,
+      "⚠️ A test plan is required before the implementation plan can be generated. " +
+      "Please apply `ai:ready-for-test-plan` to generate it first."
+    );
+    await updateJiraLabels(jiraHost, issueKey, writeToken, writeEmail,
+      ["ai:ready-for-implementation-plan"], ["ai:needs-test-plan"], currentLabels
+    );
+    return { status: "blocked", reason: "MissingTestPlan" };
+  }
+  const testPlanContent = await downloadJiraAttachment(testPlanAttachment.content, jiraEmail, jiraToken).catch(() => "");
+
   // Fetch design docs from linked tickets
   const linkedIssues = await fetchLinkedIssues(jiraHost, issueKey, jiraEmail, jiraToken);
   let architectureDoc = "";
@@ -116,6 +135,7 @@ export async function handleJiraImplementationPlan(payload, agentCtx, registered
     acceptanceCriteria: issue.acceptanceCriteria,
     architectureDoc: architectureDoc || "(no architecture design doc found)",
     uiuxDoc: uiuxDoc || "(no UI/UX spec found)",
+    testPlanContent: testPlanContent || "(no test plan found)",
     registeredRepos,
     dependencies,
   });
@@ -162,6 +182,21 @@ export async function handleGitHubImplementationPlan(ctx, agentCtx, registeredRe
 
   console.log("impl_plan_github: starting plan generation", { owner, repoName, issueNumber, projectId });
 
+  // Gate: check for <!-- test-plan --> marker comment
+  const issueComments = await fetchIssueComments(owner, repoName, issueNumber, token);
+  const testPlanComment = issueComments.find((c) => c.body?.includes("<!-- test-plan -->"));
+  if (!testPlanComment) {
+    await postGitHubComment(owner, repoName, issueNumber, token,
+      "⚠️ A test plan is required before the implementation plan can be generated. " +
+      "Please apply `ai:ready-for-test-plan` to generate it first."
+    );
+    await removeIssueLabel(owner, repoName, issueNumber, "ai:ready-for-implementation-plan", token).catch(() => {});
+    await addIssueLabel(owner, repoName, issueNumber, "ai:needs-test-plan", token).catch(() => {});
+    console.log(`impl_plan_github: blocked — no test-plan comment for issue #${issueNumber}`);
+    return { status: "blocked", reason: "MissingTestPlan" };
+  }
+  const testPlanContent = testPlanComment.body;
+
   // Generate plan via LLM (GitHub has no attachment API — use issue body only)
   const { content: planMarkdown, usage: planUsage } = await generatePlan({
     issueKey: `${owner}/${repoName}#${issueNumber}`,
@@ -170,6 +205,7 @@ export async function handleGitHubImplementationPlan(ctx, agentCtx, registeredRe
     acceptanceCriteria: "",
     architectureDoc: "(not available via GitHub — check linked design docs)",
     uiuxDoc: "(not available via GitHub — check linked design docs)",
+    testPlanContent: testPlanContent || "(no test plan found)",
     registeredRepos,
     dependencies,
   });
@@ -213,7 +249,7 @@ export async function handleGitHubImplementationPlan(ctx, agentCtx, registeredRe
 // Shared — LLM plan generation
 // ---------------------------------------------------------------------------
 
-async function generatePlan({ issueKey, title, description, acceptanceCriteria, architectureDoc, uiuxDoc, registeredRepos, dependencies }) {
+async function generatePlan({ issueKey, title, description, acceptanceCriteria, architectureDoc, uiuxDoc, testPlanContent, registeredRepos, dependencies }) {
   const promptTemplate = await readFile(
     path.join(process.cwd(), "prompts", "implementation-plan-prompt.md"),
     "utf8"
@@ -230,6 +266,7 @@ async function generatePlan({ issueKey, title, description, acceptanceCriteria, 
     .replaceAll("{{ACCEPTANCE_CRITERIA}}", acceptanceCriteria || "(no acceptance criteria)")
     .replaceAll("{{ARCHITECTURE_DOC}}", architectureDoc)
     .replaceAll("{{UIUX_DOC}}", uiuxDoc)
+    .replaceAll("{{TEST_PLAN}}", testPlanContent || "Not provided")
     .replaceAll("{{REGISTERED_REPOS}}", repoList);
 
   if (dependencies.generatePlan) {
@@ -325,5 +362,40 @@ function extractJiraHost(payload) {
     return new URL(selfUrl).hostname || null;
   } catch {
     return null;
+  }
+}
+
+async function fetchIssueComments(owner, repo, issueNumber, token) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "myridius-code-agent/1.0",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GitHub fetch issue comments failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+async function postGitHubComment(owner, repo, issueNumber, token, body) {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+      "User-Agent": "myridius-code-agent/1.0",
+    },
+    body: JSON.stringify({ body }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`GitHub post comment failed (${res.status}): ${text}`);
   }
 }

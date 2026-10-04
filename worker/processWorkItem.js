@@ -24,6 +24,7 @@ import { createAzdoClient } from "./azdo-client.js";
 import { createGitHubClient, isGitHubPayload, extractGitHubIssueContext, addIssueLabel, removeIssueLabel, findPlanComment } from "./github-client.js";
 import { isJiraPayload, extractJiraIssueContext, extractRepoFromTitle, createJiraGitHubClient, postJiraComment, fetchIssueAttachments, downloadJiraAttachment, updateJiraLabels } from "./jira-client.js";
 import { handleJiraImplementationPlan, handleGitHubImplementationPlan } from "./implementation-plan-handler.js";
+import { handleAdoImplementationPlan } from "./ado-implementation-plan-handler.js";
 import { acquireToken } from "./broker-client.js";
 import { runMyridiusImplementation } from "./claude-runner.js";
 import { cloneRepository, resolveGitUsername } from "./git-utils.js";
@@ -81,6 +82,13 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
   const azdo = dependencies.azdoClient || createAzdoClient({ org, project });
   const cloneRepo = dependencies.cloneRepository || cloneRepository;
   const runImplementation = dependencies.runImplementation || runMyridiusImplementation;
+
+  // ── ADO plan route ──────────────────────────────────────────────────────────
+  const adoLabelAdded = agentCtxAdo.labelAdded ?? "";
+  if (adoLabelAdded === "ai:ready-for-implementation-plan") {
+    const workItemId = Number(payload?.resource?.workItemId ?? payload?.resource?.id ?? 0);
+    return handleAdoImplementationPlan(workItemId, azdo, agentCtxAdo, registeredReposAdo);
+  }
 
   if (!decision.eligible) {
     const workItemId = Number(payload?.resource?.workItemId ?? payload?.resource?.id ?? 0);
@@ -146,6 +154,9 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
   // --- Read prompt template once ---
   const promptTemplate = await readFile(path.join(process.cwd(), "prompts", "implementation-prompt.md"), "utf8");
 
+  // Mark implementation as in-progress via ADO tags
+  await azdo.updateTags(decision.workItemId, ["ai:ready-for-implementation"], ["ai:implementation-in-progress"]).catch(() => {});
+
   // --- Implement in each selected repo sequentially ---
   const repoResults = [];
   for (const repo of selectedRepos) {
@@ -187,10 +198,16 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
   let adoResult;
   if (implemented.length === repoResults.length) {
     adoResult = { category: "implemented", workItemId: decision.workItemId, repos: repoResults };
+    await azdo.updateTags(decision.workItemId, ["ai:implementation-in-progress"], ["ai:implementation-complete"]).catch(() => {});
+    await azdo.patchWorkItemFields(decision.workItemId, [
+      { op: "add", path: `/fields/${STATUS_FIELD}`, value: "ImplementationComplete" }
+    ]).catch(() => {});
   } else if (blocked.length > 0) {
     adoResult = { category: "blocked", workItemId: decision.workItemId, repos: repoResults };
+    await azdo.updateTags(decision.workItemId, ["ai:implementation-in-progress"], []).catch(() => {});
   } else {
     adoResult = { category: "skipped", workItemId: decision.workItemId, repos: repoResults };
+    await azdo.updateTags(decision.workItemId, ["ai:implementation-in-progress"], []).catch(() => {});
   }
 
   if (adoLockHeld && storageConnStrAdo && executionIdAdo) {
@@ -324,6 +341,11 @@ async function processGitHubIssueEventBody(payload, dependencies = {}) {
   const enrichedPromptGh = promptTemplate.replaceAll("{{IMPLEMENTATION_PLAN}}", planSection);
 
   const allRepoNamesGh = selectedReposGh.map((r) => r.name);
+
+  // Mark implementation as in-progress via GitHub labels
+  await removeIssueLabel(ctx.owner, ctx.repoName, ctx.issueNumber, "ai:ready-for-implementation", ghToken).catch(() => {});
+  await addIssueLabel(ctx.owner, ctx.repoName, ctx.issueNumber, "ai:implementation-in-progress", ghToken).catch(() => {});
+
   const repoResults = [];
 
   for (const repo of selectedReposGh) {
@@ -356,6 +378,14 @@ async function processGitHubIssueEventBody(payload, dependencies = {}) {
 
   if (implemented.length > 0 || blocked.length > 0) {
     await github.postComment(ctx.issueNumber, buildSummaryComment(repoResults, ctx.issueNumber, github));
+  }
+
+  // Update GitHub labels based on outcome
+  if (implemented.length === repoResults.length) {
+    await removeIssueLabel(ctx.owner, ctx.repoName, ctx.issueNumber, "ai:implementation-in-progress", ghToken).catch(() => {});
+    await addIssueLabel(ctx.owner, ctx.repoName, ctx.issueNumber, "ai:implementation-complete", ghToken).catch(() => {});
+  } else {
+    await removeIssueLabel(ctx.owner, ctx.repoName, ctx.issueNumber, "ai:implementation-in-progress", ghToken).catch(() => {});
   }
 
   let ghResult;
@@ -572,6 +602,22 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
     acceptanceCriteria: ctx.acceptanceCriteria,
   };
 
+  // Mark implementation as in-progress via Jira labels
+  {
+    const currentLabelsForInProgress = Array.isArray(payload?.issue?.fields?.labels) ? payload.issue.fields.labels : [];
+    try {
+      const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+        projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+      );
+      await updateJiraLabels(
+        jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+        ["ai:ready-for-implementation"], ["ai:implementation-in-progress"], currentLabelsForInProgress
+      );
+    } catch (labelErr) {
+      console.warn(`aca_jira_worker: failed to set ai:implementation-in-progress label: ${labelErr.message}`);
+    }
+  }
+
   const repoResults = [];
   for (const repo of selectedReposJira) {
     const repoName = repo.name;
@@ -621,6 +667,29 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
   }
 
   let jiraResult;
+  // Update Jira labels based on outcome
+  {
+    const currentLabelsForComplete = Array.isArray(payload?.issue?.fields?.labels) ? payload.issue.fields.labels : [];
+    try {
+      const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+        projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+      );
+      if (implemented.length === repoResults.length) {
+        await updateJiraLabels(
+          jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+          ["ai:implementation-in-progress"], ["ai:implementation-complete"], currentLabelsForComplete
+        );
+      } else {
+        await updateJiraLabels(
+          jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+          ["ai:implementation-in-progress"], [], currentLabelsForComplete
+        ).catch(() => {});
+      }
+    } catch (labelErr) {
+      console.warn(`aca_jira_worker: failed to update outcome labels: ${labelErr.message}`);
+    }
+  }
+
   if (implemented.length === repoResults.length) {
     jiraResult = { category: "implemented", workItemId: ctx.issueKey, repos: repoResults };
   } else if (blocked.length > 0) {

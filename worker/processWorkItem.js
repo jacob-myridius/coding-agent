@@ -610,7 +610,7 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
         projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
       );
       await updateJiraLabels(
-        jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+        jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
         ["ai:ready-for-implementation"], ["ai:implementation-in-progress"], currentLabelsForInProgress
       );
     } catch (labelErr) {
@@ -676,12 +676,12 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
       );
       if (implemented.length === repoResults.length) {
         await updateJiraLabels(
-          jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+          jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
           ["ai:implementation-in-progress"], ["ai:implementation-complete"], currentLabelsForComplete
         );
       } else {
         await updateJiraLabels(
-          jiraHost, ctx.issueKey, jiraWriteToken, jiraWriteEmail,
+          jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
           ["ai:implementation-in-progress"], [], currentLabelsForComplete
         ).catch(() => {});
       }
@@ -1035,13 +1035,17 @@ function delay(ms) {
  */
 function parsePlanTargetRepos(planContent) {
   if (!planContent) return [];
-  const sectionMatch = planContent.match(/^##\s+Target Repositories\s*\n([\s\S]*?)(?=\n##\s|\s*$)/m);
-  if (!sectionMatch) return [];
-  const lines = sectionMatch[1].split("\n");
+  const headingMatch = /^##\s+Target Repositories[ \t]*$/m.exec(planContent);
+  if (!headingMatch) return [];
+  const afterHeading = planContent.indexOf('\n', headingMatch.index) + 1;
+  const nextHeading = /^##[ \t]/m.exec(planContent.slice(afterHeading));
+  const sectionText = nextHeading
+    ? planContent.slice(afterHeading, afterHeading + nextHeading.index)
+    : planContent.slice(afterHeading);
   const repos = [];
-  for (const line of lines) {
+  for (const line of sectionText.split('\n')) {
     const m = line.match(/^-\s+([\w][\w./-]*)(?:\s*:.*)?$/);
-    if (m) repos.push(m[1].split("/").pop());
+    if (m) repos.push(m[1].split('/').pop());
   }
   return repos;
 }

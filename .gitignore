@@ -8,3 +8,10 @@ dist/
 .func/
 coverage/
 local.settings.json
+
+# Myridius CLI runtime state written into MYRIDIUS_CONFIG_DIR during local runs (session transcripts, backups)
+worker/config/.myridius.json
+worker/config/backups/
+worker/config/projects/
+worker/config/sessions/
+worker/config/worker-sessions/

@@ -2,3 +2,13 @@ node_modules
 dist
 worker/node_modules
 worker/tests
+worker/.env
+worker/.env.native
+# CLI runtime state from local runs (session transcripts, manifests); never bake into the image
+worker/config/.myridius.json
+worker/config/backups
+worker/config/projects
+worker/config/sessions
+worker/config/worker-sessions
+worker/config/plans
+worker/config/shell-snapshots

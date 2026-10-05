@@ -7,6 +7,10 @@
   "main": "worker.js",
   "scripts": {
     "start": "node worker.js",
+    "start:local": "node --env-file=.env.native worker.js",
+    "dev:local": "node --env-file=.env.native --watch worker.js",
+    "resume": "node scripts/resume-session.mjs",
+    "resume:local": "node --env-file=.env.native scripts/resume-session.mjs",
     "simulate": "node scripts/simulate-event.mjs",
     "smoke:gate": "node scripts/smoke-gate.mjs",
     "smoke:skip": "node scripts/smoke-skip-idempotency.mjs",

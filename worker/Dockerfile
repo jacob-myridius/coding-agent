@@ -87,8 +87,9 @@ COPY worker/ /app/
 # Strip CRLF in case the repo was checked out on Windows (core.autocrlf)
 RUN sed -i 's/\r$//' /app/scripts/startup.sh && chmod +x /app/scripts/startup.sh
 # projects/ (CLI transcripts) and worker-sessions/ (manifests) are volume mount points; creating them here
-# makes new named volumes inherit node ownership.
-RUN mkdir -p /app/config/projects /app/config/worker-sessions && chown -R node:node /app /src
+# makes new named volumes inherit node ownership. Only config/ (CLI state) is written at runtime; chown-ing all of
+# /app (node_modules) copies every file into a new layer and takes minutes.
+RUN mkdir -p /app/config/projects /app/config/worker-sessions && chown -R node:node /app/config
 
 # Verify build tools are accessible and create verification script
 RUN echo '#!/bin/bash\necho "=== Build Tools Verification ==="\necho "Java: $(which java || echo NOT_FOUND)"\njava -version 2>&1 | head -1 || echo "Java not working"\necho "Maven: $(which mvn || echo NOT_FOUND)"\nmvn -version 2>&1 | head -1 || echo "Maven not working"\necho "Gradle: $(which gradle || echo NOT_FOUND)"\necho "Node: $(which node)"\necho "================================"' > /usr/local/bin/verify-tools && chmod +x /usr/local/bin/verify-tools

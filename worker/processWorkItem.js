@@ -33,6 +33,7 @@ import { handleJiraImplementationPlan, handleGitHubImplementationPlan } from "./
 import { acquireToken } from "./broker-client.js";
 import { runMyridiusImplementation } from "./claude-runner.js";
 import { removeWorkspace } from "./process-cleanup.js";
+import { runInSessionScope } from "./session-log-bus.js";
 import { cloneRepository, resolveGitUsername } from "./git-utils.js";
 import { buildSkipKey, buildStatusReasonMessage, evaluateImplementationTrigger } from "./policy.js";
 import { computeSkipReasonUpdate } from "./skip-reason.js";
@@ -519,14 +520,24 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
 // Per-repo implementation
 // ---------------------------------------------------------------------------
 
-async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, promptTemplate, allRepoNames, cloneRepo, runImplementation, gitEmail, gitUsername, sessionContext = {} }) {
-  const { title, description, acceptanceCriteria } = fields;
+async function implementInRepo(options) {
   // Myridius CLI session id, so a run can be inspected or continued later (resume-session.js).
-  // The workspace path is derived from it so a resume can recreate the same cwd the CLI recorded.
+  // Everything logged during the run is also streamed to GET /api/sessions/:id/logs (session-log-bus.js).
   const sessionId = uuid();
+  const { decision, repoName } = options;
+  const branchName = `ai/us-${decision.workItemId}-r${decision.revision}`;
+  return runInSessionScope(
+    sessionId,
+    { kind: "implementation", workItemId: decision.workItemId, repoName, branchName },
+    () => implementInRepoSession({ ...options, sessionId, branchName })
+  );
+}
+
+async function implementInRepoSession({ azdo, repoName, repoUrl, decision, fields, promptTemplate, allRepoNames, cloneRepo, runImplementation, gitEmail, gitUsername, sessionContext = {}, sessionId, branchName }) {
+  const { title, description, acceptanceCriteria } = fields;
+  // The workspace path is derived from the session id so a resume can recreate the same cwd the CLI recorded.
   const workspacePath = path.join(os.tmpdir(), `myridius-worker-${sessionId}`);
   await mkdir(workspacePath, { recursive: true });
-  const branchName = `ai/us-${decision.workItemId}-r${decision.revision}`;
 
   const allReposContext = allRepoNames.length > 1
     ? `This work item spans multiple repositories. You are implementing changes for '${repoName}'.\n` +

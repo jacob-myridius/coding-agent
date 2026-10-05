@@ -3,14 +3,28 @@ import { EventHubConsumerClient } from "@azure/event-hubs";
 import { processWorkItemEventBody } from "./processWorkItem.js";
 import { logWorkerEvent } from "./event-logger.js";
 import { TableCheckpointStore } from "./table-checkpoint-store.js";
+import { createSessionRequestHandler } from "./session-http.js";
+import { installConsoleTap } from "./session-log-bus.js";
 
-// Health HTTP server — start immediately so probes succeed even if Event Hub is misconfigured
-http.createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/api/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "myridius-code-agent" }));
-  } else {
-    res.writeHead(404);
+// Copy every log line of an implementation/resume run into that session's live log buffer.
+installConsoleTap();
+const handleSessionRequest = createSessionRequestHandler();
+
+// HTTP server — start immediately so probes succeed even if Event Hub is misconfigured.
+// Serves health checks and the session routes (list, live logs, resume — see session-http.js).
+http.createServer(async (req, res) => {
+  try {
+    if (await handleSessionRequest(req, res)) return;
+    if (req.method === "GET" && req.url === "/api/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", service: "myridius-code-agent" }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  } catch (err) {
+    console.error("aca_claude_worker_http_error", { url: req.url, error: err.message });
+    if (!res.headersSent) res.writeHead(500);
     res.end();
   }
 }).listen(parseInt(process.env.PORT ?? "80", 10), () => {

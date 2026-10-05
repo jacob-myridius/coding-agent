@@ -3,6 +3,7 @@ import { acquireToken } from "./broker-client.js";
 import { runMyridiusImplementation } from "./claude-runner.js";
 import { cloneBranch, resolveGitUsername } from "./git-utils.js";
 import { removeWorkspace } from "./process-cleanup.js";
+import { runInSessionScope, sessionLogBus } from "./session-log-bus.js";
 import {
   assertSessionId,
   findSessionTranscript,
@@ -25,13 +26,24 @@ import {
  *   prompt: string,
  *   push?: boolean,
  *   keepWorkspace?: boolean,
- *   overrides?: { repoUrl?: string, branchName?: string, projectId?: string, provider?: string }
- * }} options
- * @param {object} [dependencies] injectable side effects (env, acquireToken, cloneBranch, runImplementation, resolveGitUsername)
+ *   overrides?: { repoUrl?: string, branchName?: string, projectId?: string, provider?: string },
+ *   hooks?: {
+ *     onStatus?: (phase: "cloning" | "session" | "running" | "pushing" | "done", detail?: object) => void,
+ *     onEvent?: (summary: object) => void
+ *   }
+ * }} options  hooks report progress live (used by the HTTP endpoint in session-http.js)
+ * @param {object} [dependencies] injectable side effects (env, acquireToken, cloneBranch, runImplementation, resolveGitUsername, logBus)
  */
-export async function resumeSession({ sessionId, prompt, push = true, keepWorkspace = false, overrides = {} }, dependencies = {}) {
-  assertSessionId(sessionId);
-  if (!String(prompt || "").trim()) throw new Error("resumeSession: a prompt (the follow-up message) is required");
+export async function resumeSession(options, dependencies = {}) {
+  assertSessionId(options.sessionId);
+  if (!String(options.prompt || "").trim()) throw new Error("resumeSession: a prompt (the follow-up message) is required");
+  // Everything logged during the resume is also streamed to GET /api/sessions/:id/logs (session-log-bus.js).
+  const logBus = dependencies.logBus || sessionLogBus;
+  return runInSessionScope(options.sessionId, { kind: "resume" }, () => resumeInScope(options, dependencies, logBus), logBus);
+}
+
+async function resumeInScope({ sessionId, prompt, push = true, keepWorkspace = false, overrides = {}, hooks = {} }, dependencies, logBus) {
+  const onStatus = (phase, detail) => hooks.onStatus?.(phase, detail);
 
   const env = dependencies.env || process.env;
   const getToken = dependencies.acquireToken || acquireToken;
@@ -65,6 +77,7 @@ export async function resumeSession({ sessionId, prompt, push = true, keepWorksp
     throw new Error(`resumeSession: session ${sessionId} has no manifest value for: ${missing.join(", ")}`);
   }
 
+  logBus.annotate(sessionId, { workItemId: manifest.workItemId, repoName: manifest.repoName, branchName: target.branchName });
   console.log("aca_claude_worker_resume_started", {
     sessionId,
     repoUrl: stripCredentials(target.repoUrl),
@@ -92,6 +105,7 @@ export async function resumeSession({ sessionId, prompt, push = true, keepWorksp
   await mkdir(target.workspacePath, { recursive: true });
   try {
     // ── Step 1: clone the feature branch ─────────────────────────────────────
+    onStatus("cloning");
     const { repoGit, branchExisted } = await clone({
       repoUrl: authUrl,
       branchName: target.branchName,
@@ -101,12 +115,15 @@ export async function resumeSession({ sessionId, prompt, push = true, keepWorksp
     });
     const initialHead = String(await repoGit.revparse(["HEAD"])).trim();
     console.log("aca_claude_worker_resume_cloned", { sessionId, branchName: target.branchName, branchExisted, head: initialHead });
+    onStatus("session", { sessionId, branchName: target.branchName, branchExisted, head: initialHead });
 
     // ── Step 2: resume the CLI session ───────────────────────────────────────
+    onStatus("running");
     await runImplementation({
       workspacePath: target.workspacePath,
       prompt: buildResumePrompt({ ...target, branchExisted, head: initialHead, prompt }),
-      resumeSessionId: sessionId
+      resumeSessionId: sessionId,
+      onEvent: hooks.onEvent
     });
 
     // ── Step 3: push whatever the agent committed ────────────────────────────
@@ -116,12 +133,14 @@ export async function resumeSession({ sessionId, prompt, push = true, keepWorksp
       : Number.parseInt(String(await repoGit.raw(["rev-list", "--count", `${initialHead}..${finalHead}`])).trim(), 10) || 0;
     let pushed = false;
     if (newCommits > 0 && push) {
+      onStatus("pushing");
       await repoGit.push("origin", target.branchName, { "--set-upstream": null });
       pushed = true;
     }
 
     const result = { sessionId, branchName: target.branchName, branchExisted, initialHead, finalHead, newCommits, pushed };
     console.log("aca_claude_worker_resume_completed", result);
+    onStatus("done");
     return result;
   } finally {
     if (!keepWorkspace) {

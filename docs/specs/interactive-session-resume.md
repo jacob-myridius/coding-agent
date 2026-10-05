@@ -235,6 +235,8 @@ Implementation notes:
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
+| 0. HTTP resume (done) | `POST /api/sessions/:sessionId/resume` on the worker's HTTP server (`worker/session-http.js`): one message per request, NDJSON progress stream, bearer secret, per-session in-process lock. Host helper `local/resume-session.sh` | Resume from the host against the container or a native worker |
+| 0b. Live session logs (done) | `GET /api/sessions/:sessionId/logs` (SSE) and `GET /api/sessions` (`worker/session-http.js`). Each implementation/resume run is wrapped in an AsyncLocalStorage scope; a console tap copies every log line of the run (credentials redacted) into an in-memory per-session ring buffer (`worker/session-log-bus.js`). Replay via `Last-Event-ID`/`?after=`, then live until `end`; resume returns 409 while a run is still going. Host helper `local/session-logs.sh` | Attach to a running Event Hub implementation run from the host and watch clone → CLI → push → tests → PR live |
 | 1. Agent core | §7.1, §7.2, §7.3, §7.4 locally; transcripts from the local config folder | Multi-turn resume works locally via `wscat`; the agent pushes to the feature branch; lock rejects a second connection |
 | 2. Storage | §8 option A with Azurite locally, Blob Storage in Azure; worker uploads after runs | A session created on one container resumes on another |
 | 3. Console | §10 API relay + tickets + UI | Developer resumes from a PR page in the local stack; unauthorized users get 403 |

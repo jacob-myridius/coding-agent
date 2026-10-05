@@ -19,8 +19,9 @@ const DEFAULT_LOG_MAX_CHARS = 2000;
  * - New run: pass `sessionId` (or let one be generated) and optionally `sessionManifest`,
  *   which is saved next to the CLI's transcripts so the session can be resumed later.
  * - Resume: pass `resumeSessionId`; the CLI continues that conversation (`--resume`).
+ * `onEvent(summary)` receives each summarized stream-json event (the same object that is logged).
  */
-export async function runMyridiusImplementation({ workspacePath, prompt, sessionId, resumeSessionId, sessionManifest }) {
+export async function runMyridiusImplementation({ workspacePath, prompt, sessionId, resumeSessionId, sessionManifest, onEvent }) {
   const resuming = Boolean(resumeSessionId);
   // Pre-assigning the session id means it is known (and logged) even if the CLI fails
   // before emitting its init event, and the run can later be continued with --resume.
@@ -57,7 +58,8 @@ export async function runMyridiusImplementation({ workspacePath, prompt, session
       streamLineLogs: parseBooleanFlag(process.env.MYRIDIUS_CLI_STREAM_LINE_LOGS, true),
       parseStreamJson: args.includes("stream-json"),
       logMaxChars: parsePositiveInt(process.env.MYRIDIUS_CLI_LOG_MAX_CHARS, DEFAULT_LOG_MAX_CHARS),
-      session
+      session,
+      onEvent
     });
   } catch (error) {
     error.sessionId = session.id;
@@ -187,7 +189,7 @@ function runProcess(bin, args, options) {
 
     const session = options.session;
     const forwardStdout = options.parseStreamJson
-      ? createStreamJsonForwarder(options.logMaxChars, session)
+      ? createStreamJsonForwarder(options.logMaxChars, session, options.onEvent)
       : createLineForwarder("aca_claude_worker_cli_stdout_line", streamLineLogs, process.stdout, session);
     const forwardStderr = createLineForwarder("aca_claude_worker_cli_stderr_line", streamLineLogs, process.stderr, session);
 
@@ -255,7 +257,7 @@ function createLineForwarder(tag, streamLineLogs, fallbackStream, session) {
 
 // Parses the CLI's stream-json output (one JSON event per line) and logs a
 // compact structured summary of each event so runs can be monitored live.
-function createStreamJsonForwarder(maxChars, session) {
+function createStreamJsonForwarder(maxChars, session, onEvent) {
   let buffer = "";
 
   const handleLine = (line) => {
@@ -276,6 +278,11 @@ function createStreamJsonForwarder(maxChars, session) {
     const summary = { sessionId: session.id, ...summarizeStreamEvent(event, maxChars) };
     const tag = summary.type === "result" ? "aca_claude_worker_cli_result" : "aca_claude_worker_cli_event";
     console.log(tag, summary);
+    try {
+      onEvent?.(summary);
+    } catch (error) {
+      console.log("aca_claude_worker_cli_event_callback_failed", { sessionId: session.id, error: error.message });
+    }
   };
 
   const writeChunk = (chunk) => {

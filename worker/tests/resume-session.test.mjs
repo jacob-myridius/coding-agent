@@ -179,3 +179,30 @@ test("manifests never store credentials", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("reports progress through hooks in order and forwards CLI events", async () => {
+  const { root, env } = await setupConfig();
+  const { dependencies } = createMocks();
+  const seen = [];
+  const runImplementation = dependencies.runImplementation;
+  dependencies.runImplementation = async (args) => {
+    args.onEvent({ type: "assistant" });
+    return runImplementation(args);
+  };
+  try {
+    await resumeSession(
+      {
+        sessionId: SESSION_ID,
+        prompt: "Add pagination",
+        hooks: {
+          onStatus: (phase, detail) => seen.push(detail ? `${phase}:${detail.branchName}` : phase),
+          onEvent: (event) => seen.push(`event:${event.type}`)
+        }
+      },
+      { ...dependencies, env }
+    );
+    assert.deepEqual(seen, ["cloning", "session:ai/us-1-r1", "running", "event:assistant", "pushing", "done"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -5,13 +5,17 @@
 
 import { TableClient } from "@azure/data-tables";
 import { v4 as uuid } from "uuid";
+import { tableClientOptions } from "./table-checkpoint-store.js";
 
 const TABLE_NAME = "agentEvents";
+
+// Created on first write; a fresh storage account (or Azurite) doesn't have the table yet.
+let tableReady;
 
 function getClient() {
   const connStr = (process.env.AZURE_STORAGE_CONNECTION_STRING || "").trim();
   if (!connStr) return null;
-  return TableClient.fromConnectionString(connStr, TABLE_NAME);
+  return TableClient.fromConnectionString(connStr, TABLE_NAME, tableClientOptions(connStr));
 }
 
 /**
@@ -30,6 +34,11 @@ function getClient() {
 export async function logWorkerEvent(event) {
   const client = getClient();
   if (!client) return;
+  tableReady ??= client.createTable().catch((err) => {
+    tableReady = undefined; // retry on the next event
+    throw err;
+  });
+  await tableReady;
 
   const pk = `${(event.adoOrg || "").toLowerCase()}:${(event.adoProject || "").toLowerCase()}`;
   const rk = `${new Date().toISOString().replace(/[:.]/g, "-")}_${uuid()}`;

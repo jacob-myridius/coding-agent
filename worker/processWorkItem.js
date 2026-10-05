@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { v4 as uuid } from "uuid";
@@ -7,13 +7,19 @@ import { v4 as uuid } from "uuid";
 // Configurable via IMPL_TIMEOUT_MS; defaults to 30 minutes.
 const IMPL_TIMEOUT_MS = parseInt(process.env.IMPL_TIMEOUT_MS || "1800000", 10);
 
+const TIMEOUT_MESSAGE_PREFIX = "Implementation timed out after";
+
+function failureReasonCode(err) {
+  return String(err?.message || "").startsWith(TIMEOUT_MESSAGE_PREFIX) ? "ImplementationTimeout" : "ImplementationError";
+}
+
 function withTimeout(promise, ms, label) {
   let timer;
   const race = Promise.race([
     promise,
     new Promise((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error(`Implementation timed out after ${ms}ms: ${label}`)),
+        () => reject(new Error(`${TIMEOUT_MESSAGE_PREFIX} ${ms}ms: ${label}`)),
         ms
       );
     }),
@@ -26,6 +32,7 @@ import { isJiraPayload, extractJiraIssueContext, extractRepoFromTitle, createJir
 import { handleJiraImplementationPlan, handleGitHubImplementationPlan } from "./implementation-plan-handler.js";
 import { acquireToken } from "./broker-client.js";
 import { runMyridiusImplementation } from "./claude-runner.js";
+import { removeWorkspace } from "./process-cleanup.js";
 import { cloneRepository, resolveGitUsername } from "./git-utils.js";
 import { buildSkipKey, buildStatusReasonMessage, evaluateImplementationTrigger } from "./policy.js";
 import { computeSkipReasonUpdate } from "./skip-reason.js";
@@ -134,12 +141,13 @@ export async function processWorkItemEventBody(body, dependencies = {}) {
         runImplementation,
         gitEmail,
         gitUsername,
+        sessionContext: { tracker: "azure-devops", provider: "azure-devops", projectId: agentCtxAdo.projectId, executionId: agentCtxAdo.executionId },
       }),
       IMPL_TIMEOUT_MS,
       `wi=${decision.workItemId} repo=${repoName}`
     ).catch((err) => {
       console.error(`[${repoName}] implementInRepo failed: ${err.message}`);
-      return { category: "skipped", reasonCode: "ImplementationTimeout", repoName, branchName: `ai/us-${decision.workItemId}-r${decision.revision}` };
+      return { category: "skipped", reasonCode: failureReasonCode(err), repoName, branchName: `ai/us-${decision.workItemId}-r${decision.revision}`, error: err.message };
     });
     repoResults.push(result);
   }
@@ -270,12 +278,13 @@ async function processGitHubIssueEventBody(payload, dependencies = {}) {
         runImplementation,
         gitEmail,
         gitUsername,
+        sessionContext: { tracker: "github", provider: "github", projectId: agentCtxGh.projectId, executionId: agentCtxGh.executionId },
       }),
       IMPL_TIMEOUT_MS,
       `github-issue=${ctx.issueNumber} repo=${repoName}`
     ).catch((err) => {
       console.error(`[${repoName}] GitHub implementInRepo failed: ${err.message}`);
-      return { category: "skipped", reasonCode: "ImplementationTimeout", repoName, branchName: `ai/issue-${ctx.issueNumber}` };
+      return { category: "skipped", reasonCode: failureReasonCode(err), repoName, branchName: `ai/us-${ctx.issueNumber}-r1`, error: err.message };
     });
     repoResults.push(result);
   }
@@ -467,12 +476,13 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
         runImplementation,
         gitEmail,
         gitUsername,
+        sessionContext: { tracker: "jira", provider: "github", projectId, executionId },
       }),
       IMPL_TIMEOUT_MS,
       `jira-issue=${ctx.issueKey} repo=${repoName}`
     ).catch((err) => {
       console.error(`[${repoName}] Jira implementInRepo failed: ${err.message}`);
-      return { category: "skipped", reasonCode: "ImplementationTimeout", repoName, branchName: `ai/us-${ctx.issueKey}-r1` };
+      return { category: "skipped", reasonCode: failureReasonCode(err), repoName, branchName: `ai/us-${ctx.issueKey}-r1`, error: err.message };
     });
     repoResults.push(result);
   }
@@ -509,9 +519,13 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
 // Per-repo implementation
 // ---------------------------------------------------------------------------
 
-async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, promptTemplate, allRepoNames, cloneRepo, runImplementation, gitEmail, gitUsername }) {
+async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, promptTemplate, allRepoNames, cloneRepo, runImplementation, gitEmail, gitUsername, sessionContext = {} }) {
   const { title, description, acceptanceCriteria } = fields;
-  const workspacePath = await mkdtemp(path.join(os.tmpdir(), `myridius-worker-${uuid()}-`));
+  // Myridius CLI session id, so a run can be inspected or continued later (resume-session.js).
+  // The workspace path is derived from it so a resume can recreate the same cwd the CLI recorded.
+  const sessionId = uuid();
+  const workspacePath = path.join(os.tmpdir(), `myridius-worker-${sessionId}`);
+  await mkdir(workspacePath, { recursive: true });
   const branchName = `ai/us-${decision.workItemId}-r${decision.revision}`;
 
   const allReposContext = allRepoNames.length > 1
@@ -570,16 +584,29 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
       .replaceAll("{{TECH_STACK}}", techStackSection)
       .replaceAll("{{CODE_CONTEXT}}", codeContext || "");
 
-    await runImplementation({ workspacePath, prompt });
+    await runImplementation({
+      workspacePath,
+      prompt,
+      sessionId,
+      sessionManifest: {
+        ...sessionContext,
+        workItemId: decision.workItemId,
+        repoName,
+        repoUrl,
+        branchName,
+        baseBranch: "main"
+      }
+    });
 
     const finalHead = await repoGit.revparse(["HEAD"]);
     if (String(finalHead || "") === String(initialHead || "")) {
       console.log(`[${repoName}] No commits created — skipping push and PR.`);
-      return { category: "skipped", reasonCode: "ExecutionSuppressed", repoName, branchName };
+      return { category: "skipped", reasonCode: "ExecutionSuppressed", repoName, branchName, sessionId };
     }
 
     console.log(`[${repoName}] Pushing branch '${branchName}'...`);
-    await repoGit.push("origin", branchName, { "--set-upstream": null, "--force": null });
+    // --no-verify: the pre-push guard (git-utils.js) only restrains the agent, not the worker.
+    await repoGit.push("origin", branchName, { "--set-upstream": null, "--force": null, "--no-verify": null });
     console.log(`[${repoName}] Branch pushed successfully.`);
 
     console.log(`[${repoName}] Running tests...`);
@@ -589,7 +616,7 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
     });
 
     if (!testResult.success) {
-      return { category: "blocked", reasonCode: "TestsFailed", repoName, branchName, testSummary: testResult.summary };
+      return { category: "blocked", reasonCode: "TestsFailed", repoName, branchName, sessionId, testSummary: testResult.summary };
     }
 
     let activePr = await findActivePullRequestWithRetry(azdo, repoName, branchName, 2, 1000);
@@ -601,14 +628,15 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
         title,
         description,
         testSummary: testResult.summary,
-        branchName
+        branchName,
+        sessionId
       });
       try {
         activePr = await azdo.createPullRequest({ repo: repoName, sourceBranch: branchName, targetRefName: "refs/heads/main", title: prTitle, description: prDescription });
         console.log(`[${repoName}] PR #${activePr.pullRequestId} created.`);
       } catch (err) {
         console.error(`[${repoName}] Failed to create PR: ${err.message}`);
-        return { category: "implemented", repoName, branchName, testSummary: testResult.summary, prCreated: false };
+        return { category: "implemented", repoName, branchName, sessionId, testSummary: testResult.summary, prCreated: false };
       }
     }
 
@@ -616,6 +644,7 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
       category: "implemented",
       repoName,
       branchName,
+      sessionId,
       pullRequestId: activePr.pullRequestId,
       pullRequestUrl: activePr.url || buildPrUrl(azdo, repoName, activePr.pullRequestId),
       testSummary: testResult.summary,
@@ -623,9 +652,9 @@ async function implementInRepo({ azdo, repoName, repoUrl, decision, fields, prom
     };
   } catch (err) {
     console.error(`[${repoName}] Implementation error: ${err.message}`);
-    return { category: "skipped", reasonCode: "ImplementationError", repoName, branchName, error: err.message };
+    return { category: "skipped", reasonCode: "ImplementationError", repoName, branchName, sessionId, error: err.message };
   } finally {
-    await rm(workspacePath, { recursive: true, force: true });
+    await removeWorkspace(workspacePath);
   }
 }
 
@@ -680,6 +709,7 @@ function buildSummaryComment(repoResults, workItemId, azdo) {
     } else {
       lines.push(`- **Status:** ⏭️ Skipped — ${r.reasonCode || r.error || "no changes"}`);
     }
+    if (r.sessionId) lines.push(`- **Agent session:** \`${r.sessionId}\``);
     lines.push("");
   }
 
@@ -688,7 +718,7 @@ function buildSummaryComment(repoResults, workItemId, azdo) {
   return lines.join("\n");
 }
 
-function buildPullRequestDescription({ workItemId, title, description, testSummary, branchName }) {
+export function buildPullRequestDescription({ workItemId, title, description, testSummary, branchName, sessionId }) {
   const plainDesc = (description || "No description provided.").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
   const summary = plainDesc.length > 200 ? plainDesc.substring(0, 200) + "..." : plainDesc;
 
@@ -700,7 +730,12 @@ function buildPullRequestDescription({ workItemId, title, description, testSumma
     ? `- [x] Tests passing (${testSummary.passed}/${testSummary.total})`
     : `- [ ] Tests execution required`;
 
-  return `## Work Item #${workItemId}: ${title}\n\n### Summary\n${summary}\n\n${testSection}\n\n### Implementation Details\nAutomatically created for work item #${workItemId}.\n\n**Branch:** \`${branchName}\`\n\n### Checklist\n- [x] Implementation completed\n${testCheckbox}\n- [x] Code pushed to branch\n- [ ] Code review required\n\n---\n*Co-Authored-By: Myridius AI Implementation Worker*`;
+  // The hidden marker lets webhook handlers (e.g. PR merged/closed) recover the session from the PR body.
+  const sessionSection = sessionId
+    ? `\n**Agent session:** \`${sessionId}\`\n<!-- myridius-session-id: ${sessionId} -->\n`
+    : "";
+
+  return `## Work Item #${workItemId}: ${title}\n\n### Summary\n${summary}\n\n${testSection}\n\n### Implementation Details\nAutomatically created for work item #${workItemId}.\n\n**Branch:** \`${branchName}\`\n${sessionSection}\n### Checklist\n- [x] Implementation completed\n${testCheckbox}\n- [x] Code pushed to branch\n- [ ] Code review required\n\n---\n*Co-Authored-By: Myridius AI Implementation Worker*`;
 }
 
 function buildPrUrl(azdo, repoName, pullRequestId) {

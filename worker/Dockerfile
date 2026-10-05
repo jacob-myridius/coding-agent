@@ -76,10 +76,19 @@ RUN cp -r /build/dist/src/ /src/
 # Create symlink so /src code can find node_modules from /app
 RUN ln -s /app/node_modules /src/node_modules
 
+# worker/test-execution.js imports ../dist/src/lib/... (relative to /app), so also expose the build at /dist/src
+RUN mkdir -p /dist && cp -r /build/dist/src /dist/src && ln -s /app/node_modules /dist/node_modules
+
+# The CLI tarball ships a .env with credentials; it is not needed at runtime.
+RUN rm -f /app/node_modules/myridius/.env
+
 # Copy worker application files
 COPY worker/ /app/
-RUN chmod +x /app/scripts/startup.sh
-RUN mkdir -p /app/config && chown -R node:node /app /src
+# Strip CRLF in case the repo was checked out on Windows (core.autocrlf)
+RUN sed -i 's/\r$//' /app/scripts/startup.sh && chmod +x /app/scripts/startup.sh
+# projects/ (CLI transcripts) and worker-sessions/ (manifests) are volume mount points; creating them here
+# makes new named volumes inherit node ownership.
+RUN mkdir -p /app/config/projects /app/config/worker-sessions && chown -R node:node /app /src
 
 # Verify build tools are accessible and create verification script
 RUN echo '#!/bin/bash\necho "=== Build Tools Verification ==="\necho "Java: $(which java || echo NOT_FOUND)"\njava -version 2>&1 | head -1 || echo "Java not working"\necho "Maven: $(which mvn || echo NOT_FOUND)"\nmvn -version 2>&1 | head -1 || echo "Maven not working"\necho "Gradle: $(which gradle || echo NOT_FOUND)"\necho "Node: $(which node)"\necho "================================"' > /usr/local/bin/verify-tools && chmod +x /usr/local/bin/verify-tools
@@ -93,6 +102,8 @@ ENV MYRIDIUS_CLI_PERMISSION_MODE=""
 ENV MYRIDIUS_CLI_ALLOW_ROOT_BYPASS="1"
 ENV MYRIDIUS_CLI_DANGEROUSLY_SKIP_PERMISSIONS="0"
 ENV MYRIDIUS_CLI_STREAM_LINE_LOGS="1"
+ENV MYRIDIUS_CLI_OUTPUT_FORMAT="stream-json"
+ENV MYRIDIUS_CLI_VERBOSE="1"
 ENV MYRIDIUS_CLI_COMMAND=""
 ENV EVENT_HUB_CONSUMER_GROUP="claude-code-worker"
 

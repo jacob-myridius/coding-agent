@@ -72,6 +72,7 @@ client.subscribe({
             repos: result.repos?.map((r) => ({
               repoName: r.repoName,
               branchName: r.branchName,
+              sessionId: r.sessionId,
               pullRequestId: r.pullRequestId,
               testSummary: r.testSummary,
             })),

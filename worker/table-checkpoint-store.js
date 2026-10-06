@@ -14,6 +14,16 @@ import { TableClient, TableServiceClient, odata } from "@azure/data-tables";
 const OWNERSHIP_PREFIX = "own";
 const CHECKPOINT_PREFIX = "chk";
 
+/**
+ * Client options for a Tables connection string. Local emulators (Azurite) serve plain
+ * http, which the SDK rejects unless allowInsecureConnection is set.
+ */
+export function tableClientOptions(connectionString) {
+  return /(^|;)\s*(DefaultEndpointsProtocol=http\s*(;|$)|TableEndpoint=http:)/i.test(connectionString)
+    ? { allowInsecureConnection: true }
+    : undefined;
+}
+
 function ownershipRow(o) {
   return {
     partitionKey: encodeKey(`${o.fullyQualifiedNamespace}|${o.eventHubName}|${o.consumerGroup}`),
@@ -68,12 +78,12 @@ export class TableCheckpointStore {
   constructor(connectionString, tableName = "eventhubcheckpoints") {
     this._connStr = connectionString;
     this._tableName = tableName;
-    this._client = TableClient.fromConnectionString(connectionString, tableName);
+    this._client = TableClient.fromConnectionString(connectionString, tableName, tableClientOptions(connectionString));
   }
 
   async ensureTable() {
     try {
-      const svc = TableServiceClient.fromConnectionString(this._connStr);
+      const svc = TableServiceClient.fromConnectionString(this._connStr, tableClientOptions(this._connStr));
       await svc.createTable(this._tableName);
     } catch {
       // table already exists — fine

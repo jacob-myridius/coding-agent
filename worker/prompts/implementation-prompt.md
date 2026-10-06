@@ -48,16 +48,17 @@ Output expectations:
 - Commit all changes to the work item branch with a descriptive commit message
 - **Do NOT run tests yourself** - the automation worker will run tests after you complete
 - **Do NOT create pull requests** - the automation worker will create the PR after tests pass
-- **Do NOT push to origin** - the automation worker will push the branch after verification
-- Leave the repository with all changes committed locally
+- Push your commits to the work item branch: `git push origin {{WORK_ITEM_BRANCH}}` (at minimum after your final commit)
+- Only push the work item branch. Never push other branches, never force-push, never delete remote branches (a git hook rejects these)
+- Leave the repository with all changes committed and pushed
 
 IMPORTANT: Your job is to implement the code and tests, then commit them. The automation worker will handle:
 1. Running the test suite (Maven, Gradle, npm test, pytest, etc.)
 2. Validating code coverage
-3. Pushing the branch to origin
+3. Pushing any commits you have not pushed yet
 4. Creating the pull request in Azure DevOps
 
-If you cannot run tests or create PRs, that is expected and correct. Simply implement, test, and commit.
+If you cannot run tests or create PRs, that is expected and correct. Simply implement, commit, and push to the work item branch.
 
 
 

@@ -567,10 +567,16 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
   // Determine which repos to implement in.
   // When a plan specifies "## Target Repositories", use those. Otherwise fall back to heuristic selection.
   const planTargetReposJira = parsePlanTargetRepos(implementationPlanContent);
+  // Cross-validate plan-specified repos against registered repos to exclude tracker names
+  // (e.g. "jira", "github") or other non-repo entries the LLM may include in the plan.
+  const registeredRepoNames = new Set(registeredRepos.map((r) => r.split("/").pop()));
+  const validPlanReposJira = planTargetReposJira.length > 0 && registeredRepoNames.size > 0
+    ? planTargetReposJira.filter((name) => registeredRepoNames.has(name))
+    : planTargetReposJira;
   let selectedReposJira;
-  if (planTargetReposJira.length > 0) {
-    selectedReposJira = planTargetReposJira.map((name) => ({ name, active: true }));
-    console.log(`aca_jira_worker: using plan-specified repos: [${planTargetReposJira.join(", ")}]`);
+  if (validPlanReposJira.length > 0) {
+    selectedReposJira = validPlanReposJira.map((name) => ({ name, active: true }));
+    console.log(`aca_jira_worker: using plan-specified repos: [${validPlanReposJira.join(", ")}]`);
   } else if (registeredRepos.length > 0) {
     const repoObjs = registeredRepos.map((r) => ({ name: r.split("/").pop(), active: true }));
     selectedReposJira = selectRepositories(repoObjs, { title: ctx.title, description: ctx.body, workItemType: "story" });
@@ -612,20 +618,24 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
     acceptanceCriteria: ctx.acceptanceCriteria,
   };
 
-  // Mark implementation as in-progress via Jira labels
-  {
-    const currentLabelsForInProgress = Array.isArray(payload?.issue?.fields?.labels) ? payload.issue.fields.labels : [];
-    try {
-      const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
-        projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
-      );
-      await updateJiraLabels(
-        jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
-        ["ai:ready-for-implementation"], ["ai:implementation-in-progress"], currentLabelsForInProgress
-      );
-    } catch (labelErr) {
-      console.warn(`aca_jira_worker: failed to set ai:implementation-in-progress label: ${labelErr.message}`);
-    }
+  // Mark implementation as in-progress via Jira labels.
+  // Track the computed label state so the post-loop update uses an accurate base rather than
+  // the stale webhook snapshot (which still contains ai:ready-for-implementation and would
+  // re-add it to the ticket if used as the base for the post-loop PUT).
+  const webhookLabels = Array.isArray(payload?.issue?.fields?.labels) ? payload.issue.fields.labels : [];
+  const labelsAfterInProgress = webhookLabels
+    .filter((l) => l !== "ai:ready-for-implementation")
+    .concat(["ai:implementation-in-progress"]);
+  try {
+    const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+      projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+    );
+    await updateJiraLabels(
+      jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
+      ["ai:ready-for-implementation"], ["ai:implementation-in-progress"], webhookLabels
+    );
+  } catch (labelErr) {
+    console.warn(`aca_jira_worker: failed to set ai:implementation-in-progress label: ${labelErr.message}`);
   }
 
   const repoResults = [];
@@ -678,27 +688,26 @@ async function processJiraIssueEventBody(payload, dependencies = {}) {
   }
 
   let jiraResult;
-  // Update Jira labels based on outcome
-  {
-    const currentLabelsForComplete = Array.isArray(payload?.issue?.fields?.labels) ? payload.issue.fields.labels : [];
-    try {
-      const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
-        projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+  // Update Jira labels based on outcome. Use labelsAfterInProgress (computed from the pre-loop
+  // update) as the base rather than the stale webhook snapshot, which still contains
+  // ai:ready-for-implementation and would re-add it to the ticket if used here.
+  try {
+    const { token: jiraWriteToken, email: jiraWriteEmail } = await acquireToken(
+      projectId, "code", "jira", consoleUrl, agentSecret, "development", executionId, ["ISSUE_WRITE"]
+    );
+    if (implemented.length === repoResults.length) {
+      await updateJiraLabels(
+        jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
+        ["ai:implementation-in-progress"], ["ai:implementation-complete"], labelsAfterInProgress
       );
-      if (implemented.length === repoResults.length) {
-        await updateJiraLabels(
-          jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
-          ["ai:implementation-in-progress"], ["ai:implementation-complete"], currentLabelsForComplete
-        );
-      } else {
-        await updateJiraLabels(
-          jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
-          ["ai:implementation-in-progress"], [], currentLabelsForComplete
-        ).catch(() => {});
-      }
-    } catch (labelErr) {
-      console.warn(`aca_jira_worker: failed to update outcome labels: ${labelErr.message}`);
+    } else {
+      await updateJiraLabels(
+        jiraHost, ctx.issueKey, jiraWriteEmail, jiraWriteToken,
+        ["ai:implementation-in-progress"], [], labelsAfterInProgress
+      ).catch(() => {});
     }
+  } catch (labelErr) {
+    console.warn(`aca_jira_worker: failed to update outcome labels: ${labelErr.message}`);
   }
 
   if (implemented.length === repoResults.length) {
